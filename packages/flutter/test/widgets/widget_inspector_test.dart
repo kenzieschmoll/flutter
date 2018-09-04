@@ -14,6 +14,68 @@ import 'package:flutter_test/flutter_test.dart';
 
 typedef InspectorServiceExtensionCallback = FutureOr<Map<String, Object>> Function(Map<String, String> parameters);
 
+// Start of block of widgets where creation location line numbers and columns
+// matter.
+
+class ClockDemo extends StatefulWidget {
+  @override
+  _ClockDemoState createState() => _ClockDemoState();
+}
+
+class _ClockDemoState extends State<ClockDemo> {
+  var currentTime = DateTime.now();
+  Timer timer;
+
+  @override
+  void initState() {
+    timer = new Timer.periodic(new Duration(milliseconds: 1000 ~/ 60), timerCallBack);
+    super.initState();
+  }
+
+  void dispose() {
+    super.dispose();
+    timer.cancel();
+  }
+
+  void timerCallBack(Timer timer) {
+    setState(() {
+      currentTime = DateTime.now();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text("World Clock Demo"),
+      ),
+      body: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: <Widget>[
+          makeClock("Local", currentTime.timeZoneOffset.inHours),
+          makeClock("UTC", 0),
+          makeClock("New York, NY", -4),
+          makeClock("Chicago, IL", -5),
+          makeClock("Denver, CO", -6),
+          makeClock("Los Angeles, CA", -7),
+        ],
+      ),
+    );
+  }
+
+  Widget makeClock(String label, num utcOffset) {
+    return ListTile(
+      leading: Icon(Icons.watch),
+      title: Text(label),
+      subtitle: Text(
+        currentTime.toUtc().add(Duration(hours: utcOffset)).toIso8601String(),
+      ),
+    );
+  }
+}
+
+// End of block of widgets where creation location line numbers and columns matter
+
 class RenderRepaintBoundaryWithDebugPaint extends RenderRepaintBoundary {
   @override
   void debugPaintSize(PaintingContext context, Offset offset) {
@@ -95,6 +157,8 @@ void main() {
 class TestWidgetInspectorService extends Object with WidgetInspectorService {
   final Map<String, InspectorServiceExtensionCallback> extensions = <String, InspectorServiceExtensionCallback>{};
 
+  final Map<String, List<Map>> eventsDispatched = new Map<String, List<Map>>();
+
   @override
   void registerServiceExtension({
     @required String name,
@@ -102,6 +166,11 @@ class TestWidgetInspectorService extends Object with WidgetInspectorService {
   }) {
     assert(!extensions.containsKey(name));
     extensions[name] = callback;
+  }
+
+  @override
+  void postEvent(String eventKind, Map eventData) {
+    eventsDispatched.putIfAbsent(eventKind, () => <Map>[]).add(eventData);
   }
 
   Future<Object> testExtension(String name, Map<String, String> arguments) async {
@@ -1223,6 +1292,85 @@ class TestWidgetInspectorService extends Object with WidgetInspectorService {
     }, skip: !WidgetInspectorService.instance.isWidgetCreationTracked()); // Test requires --track-widget-creation flag.
 
     testWidgets('ext.flutter.inspector.setPubRootDirectories', (WidgetTester tester) async {
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: Stack(
+            children: const <Widget>[
+              Text('a'),
+              Text('b', textDirection: TextDirection.ltr),
+              Text('c', textDirection: TextDirection.ltr),
+            ],
+          ),
+        ),
+      );
+      final Element elementA = find.text('a').evaluate().first;
+
+      await service.testExtension('setPubRootDirectories', <String, String>{});
+      service.setSelection(elementA, 'my-group');
+      Map<String, Object> jsonObject = await service.testExtension('getSelectedWidget', <String, String>{'arg': null, 'objectGroup': 'my-group'});
+      Map<String, Object> creationLocation = jsonObject['creationLocation'];
+      expect(creationLocation, isNotNull);
+      final String fileA = creationLocation['file'];
+      expect(fileA, endsWith('widget_inspector_test.dart'));
+      expect(jsonObject, isNot(contains('createdByLocalProject')));
+      final List<String> segments = Uri.parse(fileA).pathSegments;
+      // Strip a couple subdirectories away to generate a plausible pub root
+      // directory.
+      final String pubRootTest = '/' + segments.take(segments.length - 2).join('/');
+      await service.testExtension('setPubRootDirectories', <String, String>{'arg0': pubRootTest});
+
+      service.setSelection(elementA, 'my-group');
+      expect(await service.testExtension('getSelectedWidget', <String, String>{'objectGroup': 'my-group'}), contains('createdByLocalProject'));
+
+      await service.testExtension('setPubRootDirectories', <String, String>{'arg0': '/invalid/$pubRootTest'});
+      expect(await service.testExtension('getSelectedWidget', <String, String>{'objectGroup': 'my-group'}), isNot(contains('createdByLocalProject')));
+
+      await service.testExtension('setPubRootDirectories', <String, String>{'arg0': 'file://$pubRootTest'});
+      expect(await service.testExtension('getSelectedWidget', <String, String>{'objectGroup': 'my-group'}), contains('createdByLocalProject'));
+
+      await service.testExtension('setPubRootDirectories', <String, String>{'arg0': '$pubRootTest/different'});
+      expect(await service.testExtension('getSelectedWidget', <String, String>{'objectGroup': 'my-group'}), isNot(contains('createdByLocalProject')));
+
+      await service.testExtension('setPubRootDirectories', <String, String>{
+        'arg0': '/unrelated/$pubRootTest',
+        'arg1': 'file://$pubRootTest',
+      });
+
+      expect(await service.testExtension('getSelectedWidget', <String, String>{'objectGroup': 'my-group'}), contains('createdByLocalProject'));
+
+      // The RichText child of the Text widget is created by the core framework
+      // not the current package.
+      final Element richText = find.descendant(
+        of: find.text('a'),
+        matching: find.byType(RichText),
+      ).evaluate().first;
+      service.setSelection(richText, 'my-group');
+      service.setPubRootDirectories(<Object>[pubRootTest]);
+      jsonObject = json.decode(service.getSelectedWidget(null, 'my-group'));
+      expect(jsonObject, isNot(contains('createdByLocalProject')));
+      creationLocation = jsonObject['creationLocation'];
+      expect(creationLocation, isNotNull);
+      // This RichText widget is created by the build method of the Text widget
+      // thus the creation location is in text.dart not basic.dart
+      final List<String> pathSegmentsFramework = Uri.parse(creationLocation['file']).pathSegments;
+      expect(pathSegmentsFramework.join('/'), endsWith('/packages/flutter/lib/src/widgets/text.dart'));
+
+      // Strip off /src/widgets/text.dart.
+      final String pubRootFramework = '/' + pathSegmentsFramework.take(pathSegmentsFramework.length - 3).join('/');
+      await service.testExtension('setPubRootDirectories', <String, String>{'arg0': pubRootFramework});
+      expect(await service.testExtension('getSelectedWidget', <String, String>{'objectGroup': 'my-group'}), contains('createdByLocalProject'));
+      service.setSelection(elementA, 'my-group');
+      expect(await service.testExtension('getSelectedWidget', <String, String>{'objectGroup': 'my-group'}), isNot(contains('createdByLocalProject')));
+
+      await service.testExtension('setPubRootDirectories', <String, String>{'arg0': pubRootFramework, 'arg1': pubRootTest});
+      service.setSelection(elementA, 'my-group');
+      expect(await service.testExtension('getSelectedWidget', <String, String>{'objectGroup': 'my-group'}), contains('createdByLocalProject'));
+      service.setSelection(richText, 'my-group');
+      expect(await service.testExtension('getSelectedWidget', <String, String>{'objectGroup': 'my-group'}), contains('createdByLocalProject'));
+    }, skip: !WidgetInspectorService.instance.isWidgetCreationTracked()); // Test requires --track-widget-creation flag.
+
+    testWidgets('ext.flutter.inspector.trackRebuildDirtyWidgets', (WidgetTester tester) async {
       await tester.pumpWidget(
         Directionality(
           textDirection: TextDirection.ltr,

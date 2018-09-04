@@ -31,6 +31,7 @@ import 'package:vector_math/vector_math_64.dart';
 import 'app.dart';
 import 'basic.dart';
 import 'binding.dart';
+import 'debug.dart';
 import 'framework.dart';
 import 'gesture_detector.dart';
 import 'icon_data.dart';
@@ -677,6 +678,7 @@ class _SerializeConfig {
     this.pathToInclude,
     this.includeProperties = false,
     this.expandPropertyValues = true,
+    this.includeIds = true,
   });
 
   _SerializeConfig.merge(
@@ -689,7 +691,8 @@ class _SerializeConfig {
     subtreeDepth = subtreeDepth ?? base.subtreeDepth,
     pathToInclude = pathToInclude ?? base.pathToInclude,
     includeProperties = base.includeProperties,
-    expandPropertyValues = base.expandPropertyValues;
+    expandPropertyValues = base.expandPropertyValues,
+    includeIds = base.includeIds;
 
   final String groupName;
 
@@ -710,6 +713,12 @@ class _SerializeConfig {
   /// Expand children of properties that have values that are themselves
   /// Diagnosticable objects.
   final bool expandPropertyValues;
+
+  /// Whether to include object reference ids in the JSON payload.
+  ///
+  /// If ids are included, a call to `ext.flutter.inspector.disposeGroup` is
+  /// required before the tree can be garbage collected.
+  final bool includeIds;
 }
 
 // Production implementation of [WidgetInspectorService].
@@ -773,6 +782,9 @@ mixin WidgetInspectorService {
   int _nextId = 0;
 
   List<String> _pubRootDirectories;
+
+  bool _trackRebuildDirtyWidgets = false;
+  bool _trackRepaintWidgets = false;
 
   _RegisterServiceExtensionCallback _registerServiceExtensionCallback;
   /// Registers a service extension method with the given name (full
@@ -928,6 +940,8 @@ mixin WidgetInspectorService {
     assert(!_debugServiceExtensionsRegistered);
     assert(() { _debugServiceExtensionsRegistered = true; return true; }());
 
+    WidgetsBinding.instance.addPersistentFrameCallback(_onFrameStart);
+
     _registerBoolServiceExtension(
       name: 'show',
       getter: () async => WidgetsApp.debugShowWidgetInspectorOverride,
@@ -939,6 +953,54 @@ mixin WidgetInspectorService {
         return forceRebuild();
       },
     );
+
+    if (isWidgetCreationTracked()) {
+      // Service extensions that only work if widget creation locations are
+      // tracked.
+      _registerBoolServiceExtension(
+        name: 'trackRebuildDirtyWidgets',
+        getter: () async => _trackRebuildDirtyWidgets,
+        setter: (bool value) async {
+          if (value == _trackRebuildDirtyWidgets) {
+            return null;
+          }
+          _rebuildStats.resetCounts();
+          _trackRebuildDirtyWidgets = value;
+          if (value) {
+            assert(debugOnRebuildDirtyWidget == null);
+            debugOnRebuildDirtyWidget = _onRebuildWidget;
+            // Trigger a rebuild so there are baseline stats for rebuilds
+            // performed by the app.
+            return forceRebuild();
+          } else {
+            debugOnRebuildDirtyWidget = null;
+            return null;
+          }
+        },
+      );
+
+      _registerBoolServiceExtension(
+        name: 'trackRepaintWidgets',
+        getter: () async => _trackRepaintWidgets,
+        setter: (bool value) async {
+          if (value == _trackRepaintWidgets) {
+            return;
+          }
+          _repaintStats.resetCounts();
+          _trackRepaintWidgets = value;
+          if (value) {
+            assert(debugOnProfilePaint == null);
+            debugOnProfilePaint = _onPaint;
+            // Trigger an immediate paint so the user has some baseline painting
+            // stats to view.
+            // TODO(jacobr): potentially just mark as needing paint?
+            WidgetsBinding.instance.renderViewElement?.renderObject?.reassemble();
+          } else {
+            debugOnProfilePaint = null;
+          }
+        },
+      );
+    }
 
     _registerSignalServiceExtension(
       name: 'disposeAllGroups',
@@ -995,11 +1057,16 @@ mixin WidgetInspectorService {
       name: 'getRootRenderObject',
       callback: _getRootRenderObject,
     );
-    _registerObjectGroupServiceExtension(
+    registerServiceExtension(
       name: 'getRootWidgetSummaryTree',
-      callback: _getRootWidgetSummaryTree,
+      callback: (Map<String, String> parameters) async {
+        assert(parameters.containsKey('objectGroup'));
+        return <String, Object>{'result': _getRootWidgetSummaryTree(
+          parameters['objectGroup'],
+          includeIds: parameters['includeIds'] != 'false',
+        )};
+      },
     );
-
     _registerServiceExtensionWithArg(
       name: 'getDetailsSubtree',
       callback: _getDetailsSubtree,
@@ -1048,6 +1115,11 @@ mixin WidgetInspectorService {
         };
       },
     );
+  }
+
+  void _clearStats() {
+    _rebuildStats.resetCounts();
+    _repaintStats.resetCounts();
   }
 
   /// Clear all InspectorService object references.
@@ -1308,9 +1380,18 @@ mixin WidgetInspectorService {
       return null;
     final Map<String, Object> json = node.toJsonMap();
 
-    json['objectId'] = toId(node, config.groupName);
     final Object value = node.value;
-    json['valueId'] = toId(value, config.groupName);
+    if (config.includeIds) {
+      json['objectId'] = toId(node, config.groupName);
+      json['valueId'] = toId(value, config.groupName);
+    }
+
+    if (value  is Element) {
+      if (value is StatefulElement) {
+        json['stateful'] = true;
+      }
+      json['widgetRuntimeType'] = value.widget?.runtimeType.toString();
+    }
 
     if (config.summaryTree) {
       json['summaryTree'] = true;
@@ -1319,6 +1400,7 @@ mixin WidgetInspectorService {
     final _Location creationLocation = _getCreationLocation(value);
     bool createdByLocalProject = false;
     if (creationLocation != null) {
+      json['locationId'] = _toLocationId(creationLocation);
       json['creationLocation'] = creationLocation.toJsonMap();
       if (_isLocalCreationLocation(creationLocation)) {
         createdByLocalProject = true;
@@ -1378,13 +1460,17 @@ mixin WidgetInspectorService {
     return _isLocalCreationLocation(creationLocation);
   }
 
+  final Map<_Location, bool> _localCreationLocationCache = Map<_Location, bool>.identity();
+
   bool _isLocalCreationLocation(_Location location) {
     if (_pubRootDirectories == null || location == null || location.file == null) {
       return false;
     }
+
     final String file = Uri.parse(location.file).path;
     for (String directory in _pubRootDirectories) {
       if (file.startsWith(directory)) {
+        _localCreationLocationCache[location] = true;
         return true;
       }
     }
@@ -1544,14 +1630,23 @@ mixin WidgetInspectorService {
 
   /// Returns a JSON representation of the [DiagnosticsNode] for the root
   /// [Element] showing only nodes that should be included in a summary tree.
-  String getRootWidgetSummaryTree(String groupName) {
-    return _safeJsonEncode(_getRootWidgetSummaryTree(groupName));
+  String getRootWidgetSummaryTree(String groupName, {
+    bool includeIds = true,
+  }) {
+    return _safeJsonEncode(_getRootWidgetSummaryTree(groupName, includeIds: includeIds));
   }
 
-  Map<String, Object> _getRootWidgetSummaryTree(String groupName) {
+  Map<String, Object> _getRootWidgetSummaryTree(String groupName, {
+    bool includeIds = true,
+  }) {
     return _nodeToJson(
       WidgetsBinding.instance?.renderViewElement?.toDiagnosticsNode(),
-      _SerializeConfig(groupName: groupName, subtreeDepth: 1000000, summaryTree: true),
+      _SerializeConfig(
+        groupName: groupName,
+        subtreeDepth: 1000000,
+        summaryTree: true,
+        includeIds: includeIds,
+      ),
     );
   }
 
@@ -1741,6 +1836,186 @@ mixin WidgetInspectorService {
   }
 
   bool _widgetCreationTracked;
+
+  Duration _frameStart;
+
+  void _onFrameStart(Duration timeStamp) {
+    _frameStart = timeStamp;
+    WidgetsBinding.instance.addPostFrameCallback(_onFrameEnd);
+  }
+
+  void _onFrameEnd(Duration timeStamp) {
+    if (_trackRebuildDirtyWidgets) {
+      _postStatsEvent('Flutter.RebuiltWidgets', _frameStart, _rebuildStats);
+    }
+    if (_trackRepaintWidgets) {
+      _postStatsEvent('Flutter.RepaintWidgets', _frameStart, _repaintStats);
+    }
+  }
+
+  void _postStatsEvent(String eventName, Duration startTime, _LocationStats stats) {
+    developer.postEvent(
+      eventName,
+      stats.exportToJson(startTime),
+    );
+  }
+
+  /// All events dispatched by a [WidgetInspectorService] use this method
+  /// instead of calling [developer.postEvent] directly  so that tests can
+  /// track which events were dispatched by overriding this method.
+  @protected
+  void postEvent(String eventKind, Map eventData) {
+    developer.postEvent(eventKind, eventData);
+  }
+
+  final _LocationStats _rebuildStats = _LocationStats();
+  final _LocationStats _repaintStats = _LocationStats();
+
+  void _onRebuildWidget(Element element, bool builtOnce) {
+    _rebuildStats.add(element);
+  }
+
+  void _onPaint(RenderObject renderObject) {
+    try {
+      final Element element = renderObject.debugCreator?.element;
+      assert(element is RenderObjectElement);
+      _repaintStats.add(element);
+
+      element.visitAncestorElements((Element ancestor) {
+        if (ancestor is RenderObjectElement) {
+          // This ancestor has its onw RenderObject. Don't conflate it.
+          return false;
+        }
+        _repaintStats.add(ancestor);
+        return true;
+      });
+    }
+    catch (exception, stack) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: exception,
+          stack: stack,
+        ),
+      );
+    }
+  }
+
+  /// This method is called by [WidgetBinding.performReassemble] to flush caches
+  /// of obsolete values after a hot reload.
+  ///
+  /// Do not call this method directly. Instead, use
+  /// [BindingBase.reassembleApplication].
+  void performReassemble() {
+    _clearStats();
+  }
+}
+
+///
+class _LocationCount {
+  _LocationCount(this.id, this.local, this.location);
+  final int id;
+
+  final _Location location;
+  /// Whether the location is local to the current project.
+  final bool local;
+
+  int _count = 0;
+  int get count => _count;
+
+  void clear() {
+    _count = 0;
+  }
+
+  void increment() {
+    _count++;
+  }
+}
+
+/// Class for efficiently tracking statistics for source locations.
+/// This implementation is optimized for stable memory usage.
+/// The number of unique creation locations local in the current project tends
+/// to be in the hundreds or at most low thousands.
+class _LocationStats {
+  // All locations tracked. This could also be stored as a
+  // Map<int, _LocationCount>.
+  final List<_LocationCount> _stats = <_LocationCount>[];
+
+  final List<_LocationCount> active = <_LocationCount>[];
+
+  /// All locations added since stats were last exported.
+  final List<_LocationCount> newLocations = <_LocationCount>[];
+
+  /// Increments the count associated with the Element if it is local to the
+  /// current project.
+  void add(Element element) {
+    final Object widget = element.widget;
+    if (widget is _HasCreationLocation) {
+      final _Location location = widget._location;
+      final int id = _toLocationId(location);
+
+      _LocationCount entry;
+      if (id >= _stats.length || _stats[id] == null) {
+        while (id >= _stats.length) {
+          _stats.add(null);
+        }
+        entry = new _LocationCount(
+          id,
+          WidgetInspectorService.instance._isLocalCreationLocation(location),
+          location,
+        );
+        if (entry.local) {
+          newLocations.add(entry);
+        }
+        _stats[id] = entry;
+      } else {
+        entry = _stats[id];
+      }
+
+      if (entry.local) {
+        if (entry.count == 0) {
+          active.add(entry);
+        }
+        entry.increment();
+      }
+    }
+  }
+
+  void resetCounts() {
+    for (_LocationCount entry in active) {
+      entry.clear();
+    }
+    active.clear();
+  }
+
+  /// Exports the current current counts and then resets to prepare to
+  /// accumulate additional data.
+  Map<String, dynamic> exportToJson(Duration startTime) {
+    final List<int> events = new List.filled(active.length * 2, 0);
+    int j = 0;
+    for (_LocationCount stat in active) {
+      events[j++] = stat.id;
+      events[j++] = stat.count;
+    }
+
+    final Map<String, dynamic> json = <String, dynamic>{
+      'startTime': startTime.inMicroseconds,
+      'events': events,
+    };
+
+    if (newLocations.isNotEmpty) {
+      // Ensure all newly referenced locations are included in the JSON.
+      final Map<String, List<int>> locationsJson = <String, List<int>>{};
+      for (_LocationCount entry in newLocations) {
+        final _Location location = entry.location;
+        final List<int> jsonForFile = locationsJson.putIfAbsent(location.file, () => <int>[]);
+        jsonForFile..add(entry.id)..add(location.line)..add(location.column);
+      }
+      json['newLocations'] = locationsJson;
+    }
+    resetCounts();
+    newLocations.clear();
+    return json;
+  }
 }
 
 class _WidgetForTypeTests extends Widget {
@@ -2456,4 +2731,27 @@ class _Location {
 _Location _getCreationLocation(Object object) {
   final Object candidate =  object is Element ? object.widget : object;
   return candidate is _HasCreationLocation ? candidate._location : null;
+}
+
+/// To reduce the memory usage of performance stats accumulation we deal with
+const int _slidingWindowTimeSliceInMs = 100;
+
+int _roundTimestampToChunk(int timestamp) {
+  return (timestamp ~/ _slidingWindowTimeSliceInMs) *_slidingWindowTimeSliceInMs;
+}
+
+// _Location objects are always const so we don't need to worry about the sort
+// of GC issues that are a concern for regular object ids.
+final Map<_Location, int> _locationToId = <_Location, int>{};
+List<_Location> _locations = <_Location>[];
+
+int _toLocationId(_Location location) {
+  int id = _locationToId[location];
+  if (id != null) {
+    return id;
+  }
+  id = _locations.length;
+  _locations.add(location);
+  _locationToId[location] = id;
+  return id;
 }

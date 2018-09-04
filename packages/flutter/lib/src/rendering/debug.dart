@@ -5,6 +5,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 
+import 'object.dart';
+
 export 'package:flutter/foundation.dart' show debugPrint;
 
 // Any changes to this file should be reflected in the debugAssertAllRenderVarsUnset()
@@ -116,6 +118,24 @@ bool debugCheckIntrinsicSizes = false;
 ///    areas are being excessively repainted.
 bool debugProfilePaintsEnabled = false;
 
+/// Signature for [debugOnProfilePaint] implementations.
+typedef ProfilePaintCallback = void Function(RenderObject renderObject);
+
+/// Optional callback invoked for every [RenderObject] painted.
+///
+/// This callback is only invoked in debug builds.
+///
+/// See also:
+///  * [debugProfilePaintsEnabled], which does something similar but adds
+///    [dart:developer.Timeline] events for every [RenderObject] painted instead
+///    of invoking a callback.
+///  * [debugOnBuild], which does something similar for widgets being built.
+///  * [WidgetInspectorService], which uses a [debugOnProfilePaint]
+///    callback to generate aggregate profile statistics describing what paints
+///    occurred when the `ext.flutter.inspector.trackRepaintWidgets` service
+///    extension is enabled.
+ProfilePaintCallback debugOnProfilePaint;
+
 /// Setting to true will cause all clipping effects from the layer tree to be
 /// ignored.
 ///
@@ -205,7 +225,8 @@ bool debugAssertAllRenderVarsUnset(String reason, { bool debugCheckIntrinsicSize
         debugPrintMarkNeedsPaintStacks ||
         debugPrintLayouts ||
         debugCheckIntrinsicSizes != debugCheckIntrinsicSizesOverride ||
-        debugProfilePaintsEnabled) {
+        debugProfilePaintsEnabled ||
+        debugOnProfilePaint != null) {
       throw FlutterError(reason);
     }
     return true;
