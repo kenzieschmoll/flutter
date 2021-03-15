@@ -168,7 +168,7 @@ enum SchedulerPhase {
   persistentCallbacks,
 
   /// The post-frame callbacks (scheduled by
-  /// [SchedulerBinding.addDebugPostFrameCallback] and
+  /// [SchedulerBinding.addPostFrameCallback] and
   /// [SchedulerBinding.addPostFrameCallbackOnTimelineClock]) are currently
   /// executing.
   ///
@@ -650,7 +650,7 @@ mixin SchedulerBinding on BindingBase {
     _persistentCallbacks.add(callback);
   }
 
-  final List<FrameCallback> _debugPostFrameCallbacks = <FrameCallback>[];
+  final List<FrameCallback> _postFrameCallbacks = <FrameCallback>[];
   final List<FrameCallback> _postFrameCallbacksOnTimelineClock = <FrameCallback>[];
 
   /// Schedule a callback for the end of this frame.
@@ -673,13 +673,13 @@ mixin SchedulerBinding on BindingBase {
   ///
   ///  * [scheduleFrameCallback], which registers a callback for the start of
   ///    the next frame.
-  void addDebugPostFrameCallback(FrameCallback callback) {
-    _debugPostFrameCallbacks.add(callback);
+  void addPostFrameCallback(FrameCallback callback) {
+    _postFrameCallbacks.add(callback);
   }
 
   /// Schedule a callback for the end of this frame.
   ///
-  /// This frame is run during a frame, just after the [_debugPostFrameCallbacks].
+  /// This frame is run during a frame, just after the [_postFrameCallbacks].
   ///
   /// The timestamp passed along with the callback will be the timstamp from the
   /// Timeline Clock (the clock that is used for TimelineEvents).
@@ -1084,7 +1084,7 @@ mixin SchedulerBinding on BindingBase {
   /// This method is called immediately after [handleBeginFrame]. It calls all
   /// the callbacks registered by [addPersistentFrameCallback], which typically
   /// drive the rendering pipeline, and then calls the callbacks registered by
-  /// [addDebugPostFrameCallback] and [addPostFrameCallbackOnTimelineClock].
+  /// [addPostFrameCallback] and [addPostFrameCallbackOnTimelineClock].
   ///
   /// See [handleBeginFrame] for a discussion about debugging hooks that may be
   /// useful when working with frame callbacks.
@@ -1100,8 +1100,8 @@ mixin SchedulerBinding on BindingBase {
       // DEBUG POST-FRAME CALLBACKS
       _schedulerPhase = SchedulerPhase.postFrameCallbacks;
       final List<FrameCallback> localDebugPostFrameCallbacks =
-          List<FrameCallback>.from(_debugPostFrameCallbacks);
-      _debugPostFrameCallbacks.clear();
+          List<FrameCallback>.from(_postFrameCallbacks);
+      _postFrameCallbacks.clear();
       for (final FrameCallback callback in localDebugPostFrameCallbacks)
         _invokeFrameCallback(callback, _currentFrameTimeStamp!);
 

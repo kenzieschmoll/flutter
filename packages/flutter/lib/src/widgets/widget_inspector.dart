@@ -1217,7 +1217,7 @@ mixin WidgetInspectorService {
         final List<Map<String, String>> encodedScreenshots = <Map<String, String>>[];
         for (final AppScreenshot screenshot in localScreenshots) {
           final ByteData? byteData = await screenshot.image.toByteData(format:ui.ImageByteFormat.png);
-          encodedScreenshots.add({
+          encodedScreenshots.add(<String, String>{
             'ts': '${screenshot.timestamp.inMicroseconds}',
             'data': base64.encoder.convert(Uint8List.view(byteData!.buffer)),
           });
@@ -1927,7 +1927,7 @@ mixin WidgetInspectorService {
   void _onFrameStart(Duration timeStamp) {
     assert(() {
       _frameStart = timeStamp;
-      SchedulerBinding.instance!.addDebugPostFrameCallback(_onFrameEnd);
+      SchedulerBinding.instance!.addPostFrameCallback(_onFrameEnd);
       return true;
     }());
 

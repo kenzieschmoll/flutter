@@ -840,7 +840,7 @@ mixin WidgetsBinding on BindingBase, ServicesBinding, SchedulerBinding, GestureB
   ///
   /// 10. The finalization phase in the scheduler layer: After [drawFrame]
   /// returns, [handleDrawFrame] then invokes post-frame callbacks (registered
-  /// with [addDebugPostFrameCallback] and [addPostFrameCallbackOnTimelineClock]).
+  /// with [addPostFrameCallback] and [addPostFrameCallbackOnTimelineClock]).
   //
   // When editing the above, also update rendering/binding.dart's copy.
   @override
