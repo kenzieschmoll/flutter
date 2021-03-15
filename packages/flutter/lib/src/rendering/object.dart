@@ -2002,19 +2002,19 @@ abstract class RenderObject extends AbstractNode with DiagnosticableTreeMixin im
   }
   ContainerLayer? _layer;
 
-  /// In debug mode, the compositing layer that this render object uses to repaint.
+  /// In debug and profile mode, the compositing layer that this render object
+  /// uses to repaint.
   ///
   /// This getter is intended for debugging purposes only. In release builds, it
-  /// always returns null. In debug builds, it returns the layer even if the layer
-  /// is dirty.
+  /// always returns null. In debug and profile builds, it returns the layer
+  /// even if the layer is dirty.
   ///
   /// For production code, consider [layer].
   ContainerLayer? get debugLayer {
     ContainerLayer? result;
-    assert(() {
+    if (!kReleaseMode) {
       result = _layer;
-      return true;
-    }());
+    }
     return result;
   }
 

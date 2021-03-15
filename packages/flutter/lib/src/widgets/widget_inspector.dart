@@ -740,6 +740,7 @@ mixin WidgetInspectorService {
 
   bool _trackRebuildDirtyWidgets = false;
   bool _trackRepaintWidgets = false;
+  bool _trackScreenshots = !kReleaseMode;
 
   FlutterExceptionHandler? _structuredExceptionHandler;
 
@@ -976,18 +977,27 @@ mixin WidgetInspectorService {
   ///  * [BindingBase.initServiceExtensions], which explains when service
   ///    extensions can be used.
   void initServiceExtensions(_RegisterServiceExtensionCallback registerServiceExtensionCallback) {
+    _registerServiceExtensionCallback = registerServiceExtensionCallback;
+    SchedulerBinding.instance!.addPersistentFrameCallback(_onFrameStart);
+    assert(() {
+      initDebugServiceExtensions();
+      return true;
+    }());
+    _initServiceExtensions();
+  }
+
+  /// Called to register service extensions that should only be enabled in debug
+  /// mode.
+  void initDebugServiceExtensions() {
     _structuredExceptionHandler = _reportError;
     if (isStructuredErrorsEnabled()) {
       FlutterError.onError = _structuredExceptionHandler;
     }
-    _registerServiceExtensionCallback = registerServiceExtensionCallback;
     assert(!_debugServiceExtensionsRegistered);
     assert(() {
       _debugServiceExtensionsRegistered = true;
       return true;
     }());
-
-    SchedulerBinding.instance!.addPersistentFrameCallback(_onFrameStart);
 
     final FlutterExceptionHandler defaultExceptionHandler = FlutterError.presentError;
 
@@ -1192,6 +1202,27 @@ mixin WidgetInspectorService {
         return <String, Object>{
           'result': base64.encoder.convert(Uint8List.view(byteData!.buffer)),
         };
+      },
+    );
+  }
+
+  void _initServiceExtensions() {
+    registerServiceExtension(
+      name: 'screenshots',
+      callback: (Map<String, String> parameters) async {
+        if (parameters['clear'] == 'true') {
+          _screenshots.clear();
+        }
+        final List<AppScreenshot> localScreenshots = List<AppScreenshot>.from(_screenshots);
+        final List<Map<String, String>> encodedScreenshots = <Map<String, String>>[];
+        for (final AppScreenshot screenshot in localScreenshots) {
+          final ByteData? byteData = await screenshot.image.toByteData(format:ui.ImageByteFormat.png);
+          encodedScreenshots.add({
+            'ts': '${screenshot.timestamp.inMicroseconds}',
+            'data': base64.encoder.convert(Uint8List.view(byteData!.buffer)),
+          });
+        }
+        return <String, Object?>{'result': encodedScreenshots};
       },
     );
   }
@@ -1794,23 +1825,31 @@ mixin WidgetInspectorService {
       return null;
     }
 
-    if (renderObject.debugNeedsLayout) {
-      final PipelineOwner owner = renderObject.owner!;
-      assert(owner != null);
-      assert(!owner.debugDoingLayout);
-      owner
-        ..flushLayout()
-        ..flushCompositingBits()
-        ..flushPaint();
-
-      // If we still need layout, then that means that renderObject was skipped
-      // in the layout phase and therefore can't be painted. It is clearer to
-      // return null indicating that a screenshot is unavailable than to return
-      // an empty image.
+    bool screenshotUnavailable = false;
+    assert(() {
       if (renderObject.debugNeedsLayout) {
-        return null;
+        final PipelineOwner owner = renderObject.owner!;
+        assert(owner != null);
+        assert(!owner.debugDoingLayout);
+        owner
+          ..flushLayout()
+          ..flushCompositingBits()
+          ..flushPaint();
+
+        // If we still need layout, then that means that renderObject was skipped
+        // in the layout phase and therefore can't be painted. It is clearer to
+        // return null indicating that a screenshot is unavailable than to return
+        // an empty image.
+        if (renderObject.debugNeedsLayout) {
+          screenshotUnavailable = true;
+        }
       }
+      return true;
+    }());
+    if (screenshotUnavailable) {
+      return null;
     }
+
 
     Rect renderBounds = _calculateSubtreeBounds(renderObject);
     if (margin != 0.0) {
@@ -1886,8 +1925,13 @@ mixin WidgetInspectorService {
   late Duration _frameStart;
 
   void _onFrameStart(Duration timeStamp) {
-    _frameStart = timeStamp;
-    SchedulerBinding.instance!.addPostFrameCallback(_onFrameEnd);
+    assert(() {
+      _frameStart = timeStamp;
+      SchedulerBinding.instance!.addDebugPostFrameCallback(_onFrameEnd);
+      return true;
+    }());
+
+    SchedulerBinding.instance!.addPostFrameCallbackOnTimelineClock(_onFrameEndOnTimelineClock);
   }
 
   void _onFrameEnd(Duration timeStamp) {
@@ -1898,6 +1942,25 @@ mixin WidgetInspectorService {
       _postStatsEvent('Flutter.RepaintWidgets', _repaintStats);
     }
   }
+
+  void _onFrameEndOnTimelineClock(Duration timeStamp) {
+    if (_trackScreenshots) {
+      final developer.TimelineTask screenshotTask = developer.TimelineTask();
+      screenshotTask.start('DebugRecordScreenshot');
+      screenshot(
+        RendererBinding.instance?.renderView.toDiagnosticsNode().value,
+        width: 100.0,
+        height: 100.0,
+      ).then((ui.Image? image) {
+        screenshotTask.finish();
+        if (image != null) {
+          _screenshots.add(AppScreenshot(timeStamp, image));
+        }
+      });
+    }
+  }
+
+  final List<AppScreenshot> _screenshots = <AppScreenshot>[];
 
   void _postStatsEvent(String eventName, _ElementLocationStatsTracker stats) {
     postEvent(eventName, stats.exportToJson(_frameStart));
@@ -3223,4 +3286,12 @@ class InspectorSerializationDelegate implements DiagnosticsSerializationDelegate
       addAdditionalPropertiesCallback: addAdditionalPropertiesCallback,
     );
   }
+}
+
+class AppScreenshot {
+  const AppScreenshot(this.timestamp, this.image);
+
+  final Duration timestamp;
+
+  final ui.Image image;
 }

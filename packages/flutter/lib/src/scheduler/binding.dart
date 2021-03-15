@@ -168,7 +168,9 @@ enum SchedulerPhase {
   persistentCallbacks,
 
   /// The post-frame callbacks (scheduled by
-  /// [SchedulerBinding.addPostFrameCallback]) are currently executing.
+  /// [SchedulerBinding.addDebugPostFrameCallback] and
+  /// [SchedulerBinding.addPostFrameCallbackOnTimelineClock]) are currently
+  /// executing.
   ///
   /// Typically, these callbacks handle cleanup and scheduling of work for the
   /// next frame.
@@ -648,7 +650,8 @@ mixin SchedulerBinding on BindingBase {
     _persistentCallbacks.add(callback);
   }
 
-  final List<FrameCallback> _postFrameCallbacks = <FrameCallback>[];
+  final List<FrameCallback> _debugPostFrameCallbacks = <FrameCallback>[];
+  final List<FrameCallback> _postFrameCallbacksOnTimelineClock = <FrameCallback>[];
 
   /// Schedule a callback for the end of this frame.
   ///
@@ -670,8 +673,18 @@ mixin SchedulerBinding on BindingBase {
   ///
   ///  * [scheduleFrameCallback], which registers a callback for the start of
   ///    the next frame.
-  void addPostFrameCallback(FrameCallback callback) {
-    _postFrameCallbacks.add(callback);
+  void addDebugPostFrameCallback(FrameCallback callback) {
+    _debugPostFrameCallbacks.add(callback);
+  }
+
+  /// Schedule a callback for the end of this frame.
+  ///
+  /// This frame is run during a frame, just after the [_debugPostFrameCallbacks].
+  ///
+  /// The timestamp passed along with the callback will be the timstamp from the
+  /// Timeline Clock (the clock that is used for TimelineEvents).
+  void addPostFrameCallbackOnTimelineClock(FrameCallback callback) {
+    _postFrameCallbacksOnTimelineClock.add(callback);
   }
 
   Completer<void>? _nextFrameCompleter;
@@ -690,7 +703,7 @@ mixin SchedulerBinding on BindingBase {
       if (schedulerPhase == SchedulerPhase.idle)
         scheduleFrame();
       _nextFrameCompleter = Completer<void>();
-      addPostFrameCallback((Duration timeStamp) {
+      addPostFrameCallbackOnTimelineClock((Duration timeStamp) {
         _nextFrameCompleter!.complete();
         _nextFrameCompleter = null;
       });
@@ -934,6 +947,7 @@ mixin SchedulerBinding on BindingBase {
     return _currentFrameTimeStamp!;
   }
   Duration? _currentFrameTimeStamp;
+  Duration? _currentFrameTimeStampOnTimelineClock;
 
   /// The raw time stamp as provided by the engine to
   /// [dart:ui.PlatformDispatcher.onBeginFrame] for the frame currently being
@@ -982,7 +996,7 @@ mixin SchedulerBinding on BindingBase {
       _rescheduleAfterWarmUpFrame = false;
       // Reschedule in a post-frame callback to allow the draw-frame phase of
       // the warm-up frame to finish.
-      addPostFrameCallback((Duration timeStamp) {
+      addPostFrameCallbackOnTimelineClock((Duration timeStamp) {
         // Force an engine frame.
         //
         // We need to reset _hasScheduledFrame here because we cancelled the
@@ -1023,6 +1037,8 @@ mixin SchedulerBinding on BindingBase {
   /// in response to events or timers).
   void handleBeginFrame(Duration? rawTimeStamp) {
     Timeline.startSync('Frame', arguments: timelineArgumentsIndicatingLandmarkEvent);
+    _currentFrameTimeStampOnTimelineClock = Duration(microseconds: Timeline.now);
+
     _firstRawTimeStampInEpoch ??= rawTimeStamp;
     _currentFrameTimeStamp = _adjustForEpoch(rawTimeStamp ?? _lastRawTimeStamp);
     if (rawTimeStamp != null)
@@ -1068,7 +1084,7 @@ mixin SchedulerBinding on BindingBase {
   /// This method is called immediately after [handleBeginFrame]. It calls all
   /// the callbacks registered by [addPersistentFrameCallback], which typically
   /// drive the rendering pipeline, and then calls the callbacks registered by
-  /// [addPostFrameCallback].
+  /// [addDebugPostFrameCallback] and [addPostFrameCallbackOnTimelineClock].
   ///
   /// See [handleBeginFrame] for a discussion about debugging hooks that may be
   /// useful when working with frame callbacks.
@@ -1081,13 +1097,22 @@ mixin SchedulerBinding on BindingBase {
       for (final FrameCallback callback in _persistentCallbacks)
         _invokeFrameCallback(callback, _currentFrameTimeStamp!);
 
-      // POST-FRAME CALLBACKS
+      // DEBUG POST-FRAME CALLBACKS
       _schedulerPhase = SchedulerPhase.postFrameCallbacks;
-      final List<FrameCallback> localPostFrameCallbacks =
-          List<FrameCallback>.from(_postFrameCallbacks);
-      _postFrameCallbacks.clear();
-      for (final FrameCallback callback in localPostFrameCallbacks)
+      final List<FrameCallback> localDebugPostFrameCallbacks =
+          List<FrameCallback>.from(_debugPostFrameCallbacks);
+      _debugPostFrameCallbacks.clear();
+      for (final FrameCallback callback in localDebugPostFrameCallbacks)
         _invokeFrameCallback(callback, _currentFrameTimeStamp!);
+
+      // POST-FRAME CALLBACKS ON TIMELINE CLOCK
+      final List<FrameCallback> localPostFrameCallbacks =
+          List<FrameCallback>.from(_postFrameCallbacksOnTimelineClock);
+      _postFrameCallbacksOnTimelineClock.clear();
+      Timeline.startSync('DebugPostFrameCallbacks');
+      for (final FrameCallback callback in localPostFrameCallbacks)
+        _invokeFrameCallback(callback, _currentFrameTimeStampOnTimelineClock!);
+      Timeline.finishSync();
     } finally {
       _schedulerPhase = SchedulerPhase.idle;
       Timeline.finishSync(); // end the Frame
@@ -1098,6 +1123,7 @@ mixin SchedulerBinding on BindingBase {
         return true;
       }());
       _currentFrameTimeStamp = null;
+      _currentFrameTimeStampOnTimelineClock = null;
     }
   }
 

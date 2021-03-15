@@ -490,11 +490,12 @@ mixin WidgetsBinding on BindingBase, ServicesBinding, SchedulerBinding, GestureB
             return _forceRebuild();
           },
       );
-
-      WidgetInspectorService.instance.initServiceExtensions(registerServiceExtension);
-
       return true;
     }());
+
+    if (!kReleaseMode) {
+      WidgetInspectorService.instance.initServiceExtensions(registerServiceExtension);
+    }
   }
 
   Future<void> _forceRebuild() {
@@ -839,7 +840,7 @@ mixin WidgetsBinding on BindingBase, ServicesBinding, SchedulerBinding, GestureB
   ///
   /// 10. The finalization phase in the scheduler layer: After [drawFrame]
   /// returns, [handleDrawFrame] then invokes post-frame callbacks (registered
-  /// with [addPostFrameCallback]).
+  /// with [addDebugPostFrameCallback] and [addPostFrameCallbackOnTimelineClock]).
   //
   // When editing the above, also update rendering/binding.dart's copy.
   @override
