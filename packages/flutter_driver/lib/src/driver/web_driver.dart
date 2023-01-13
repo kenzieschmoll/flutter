@@ -127,7 +127,7 @@ class WebFlutterDriver extends FlutterDriver {
     try {
       data = await _connection.sendCommand(
           "window.\$flutterDriver('${jsonEncode(serialized)}')",
-          const Duration(seconds: 20));
+          command.timeout);
 
       print('here 1');
 
