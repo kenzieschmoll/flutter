@@ -44,8 +44,12 @@ class WebCallbackManager implements CallbackManager {
   ///
   /// See: https://www.w3.org/TR/webdriver/#screen-capture.
   @override
-  Future<Map<String, dynamic>> takeScreenshot(String screenshotName, [Map<String, Object?>? args]) async {
-    await _sendWebDriverCommand(WebDriverCommand.screenshot(screenshotName, args));
+  Future<Map<String, dynamic>> takeScreenshot(String screenshotName,
+      [Map<String, Object?>? args]) async {
+    print('web callback manager about to _sendWebDriverCommand');
+    await _sendWebDriverCommand(
+        WebDriverCommand.screenshot(screenshotName, args));
+    print('web callback manager after calling _sendWebDriverCommand');
     return <String, dynamic>{
       'screenshotName': screenshotName,
       // Flutter Web doesn't provide the bytes.
@@ -60,15 +64,23 @@ class WebCallbackManager implements CallbackManager {
 
   Future<void> _sendWebDriverCommand(WebDriverCommand command) async {
     try {
+      await Future.delayed(const Duration(seconds: 5));
+      print('in _sendWebDriverCommand');
       _webDriverCommandPipe.complete(command);
+      print('before await command');
       final bool awaitCommand = await _driverCommandComplete.future;
+      print('after await command');
       if (!awaitCommand) {
+        print('we are throwing this exception right now');
         throw Exception(
             'Web Driver Command ${command.type} failed while waiting for '
             'driver side');
       }
     } catch (exception) {
-      throw Exception('Web Driver Command failed: ${command.type} with exception $exception');
+      print('throwing this exception now');
+      // rethrow;
+      throw Exception(
+          'Web Driver Command failed: ${command.type} with exception $exception');
     } finally {
       // Reset the completer.
       _driverCommandComplete = Completer<bool>();
@@ -84,6 +96,7 @@ class WebCallbackManager implements CallbackManager {
       Map<String, String> params, IntegrationTestResults testRunner) async {
     final String command = params['command']!;
     Map<String, String> response;
+    print('in callback and command = $command');
     switch (command) {
       case 'request_data':
         return params['message'] == null
@@ -103,6 +116,7 @@ class WebCallbackManager implements CallbackManager {
 
   Future<Map<String, dynamic>> _requestDataWithMessage(
       String extraMessage, IntegrationTestResults testRunner) async {
+    print('in _requestDataWithMessage');
     Map<String, String> response;
     // Driver side tests' status is added as an extra message.
     final DriverTestMessage message =
@@ -113,7 +127,9 @@ class WebCallbackManager implements CallbackManager {
       final WebDriverCommand command = await _webDriverCommandPipe.future;
       switch (command.type) {
         case WebDriverCommandType.screenshot:
-          final Map<String, dynamic> data = Map<String, dynamic>.from(command.values);
+          print('in case screenshot');
+          final Map<String, dynamic> data =
+              Map<String, dynamic>.from(command.values);
           data.addAll(
               WebDriverCommand.typeToMap(WebDriverCommandType.screenshot));
           response = <String, String>{
@@ -136,6 +152,7 @@ class WebCallbackManager implements CallbackManager {
       response = <String, String>{
         'message': Response.webDriverCommand(data: data).toJson(),
       };
+      print('completing with is success');
       _driverCommandComplete.complete(message.isSuccess);
       _webDriverCommandPipe = Completer<WebDriverCommand>();
     }
@@ -145,7 +162,9 @@ class WebCallbackManager implements CallbackManager {
     };
   }
 
-  Future<Map<String, dynamic>> _requestData(IntegrationTestResults testRunner) async {
+  Future<Map<String, dynamic>> _requestData(
+      IntegrationTestResults testRunner) async {
+    print('in _requestData');
     final bool allTestsPassed = await testRunner.allTestsPassed.future;
     final Map<String, String> response = <String, String>{
       'message': allTestsPassed
@@ -169,6 +188,7 @@ class WebCallbackManager implements CallbackManager {
     }
 
     if (!_driverCommandComplete.isCompleted) {
+      print('completing with false');
       _driverCommandComplete.complete(Future<bool>.value(false));
     }
   }

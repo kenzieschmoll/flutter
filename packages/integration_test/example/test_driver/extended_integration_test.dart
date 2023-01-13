@@ -14,6 +14,7 @@ Future<void> main() async {
       List<int> screenshotBytes, [
       Map<String, Object?>? args,
     ]) async {
+      return false;
       // Return false if the screenshot is invalid.
       // TODO(yjbanov): implement, see https://github.com/flutter/flutter/issues/86120
 
